@@ -1,20 +1,37 @@
 # Assyncronous
 
-Exemplo simples de processamento assíncrono em Python usando AWS SNS e SQS.
+Exemplo simples de processamento assíncrono em Python usando SNS e SQS, preparado para rodar tanto localmente com LocalStack quanto na AWS.
 
 ## Visão geral
 
 O projeto demonstra um fluxo básico de pedidos:
 
 1. O produtor recebe um pedido via HTTP.
-2. O pedido é publicado em um tópico SNS.
-3. Uma fila SQS recebe a mensagem.
+2. O produtor publica o pedido em um tópico SNS.
+3. A fila SQS recebe a mensagem.
 4. O consumidor lê a fila e processa o pedido.
+
+## Importante: produtor e consumidor rodam separados
+
+Sim: `producer` e `consumer` são processos diferentes.
+
+Isso vale nos dois cenários:
+
+- **localmente**, você roda `python producer/producer.py` em um terminal e `python consumer/consumer.py` em outro terminal
+- **na AWS**, eles também continuam sendo componentes separados; por exemplo, você pode rodar o produtor em uma API/EC2/container e o consumidor em outro processo, outra VM, outro container ou outro serviço
+
+O SNS e o SQS fazem a mediação assíncrona entre esses dois processos.
 
 ## Estrutura do projeto
 
 ```text
 assyncronous/
+├── .env.example
+├── docker-compose.yml
+├── README.md
+├── requirements.txt
+├── scripts/
+│   └── bootstrap_localstack.sh
 ├── main.py
 ├── producer/
 │   └── producer.py
@@ -22,126 +39,253 @@ assyncronous/
     └── consumer.py
 ```
 
-### Arquivos principais
+## Arquivos principais
 
-- `producer/producer.py`: sobe uma API Flask com a rota `POST /pedido` e publica mensagens no SNS.
-- `consumer/consumer.py`: faz polling contínuo na fila SQS e simula o processamento do pedido.
-- `main.py`: arquivo padrão do template da IDE, atualmente não faz parte do fluxo principal.
+- `producer/producer.py`: sobe a API Flask em `POST /pedido` e publica no SNS
+- `consumer/consumer.py`: fica escutando a fila SQS e processa os pedidos
+- `scripts/bootstrap_localstack.sh`: cria automaticamente tópico, fila e assinatura no LocalStack
+- `docker-compose.yml`: sobe o LocalStack com SNS e SQS
+- `.env.example`: exemplo das variáveis de ambiente
+- `requirements.txt`: dependências do projeto
 
 ## Pré-requisitos
 
-- Python 3.10+ (ou compatível com `Flask` e `boto3`)
-- Credenciais AWS configuradas localmente
-- Um tópico SNS criado na AWS
-- Uma fila SQS assinada no tópico SNS
+### Para qualquer ambiente
 
-## Dependências
+- Python 3.10+
+- ambiente virtual Python recomendado
 
-Pelo código atual, o projeto usa:
+### Para LocalStack
 
-- `boto3`
-- `Flask`
+- Docker
+- Docker Compose plugin (`docker compose`)
+- AWS CLI instalada localmente
 
-Se quiser instalar rapidamente em um ambiente virtual:
+### Para AWS real
+
+- credenciais AWS válidas
+- um tópico SNS existente
+- uma fila SQS existente
+- assinatura da fila no tópico SNS
+
+## Instalação
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install boto3 flask
+pip install -r requirements.txt
+cp .env.example .env
 ```
 
-## Configuração
+## Variáveis de ambiente
 
-Antes de executar, ajuste os placeholders no código:
+O projeto carrega o arquivo `.env` automaticamente no `producer` e no `consumer`.
 
-### No produtor
-Em `producer/producer.py`:
+### Variáveis suportadas
 
-- substitua `SEU_TOPIC_ARN` pelo ARN real do tópico SNS
+- `AWS_REGION`: região AWS. Padrão `us-east-1`
+- `AWS_DEFAULT_REGION`: região padrão para AWS CLI e SDK
+- `AWS_ENDPOINT_URL`: endpoint customizado. Use `http://localhost:4566` no LocalStack. Na AWS real, deixe vazio
+- `AWS_ACCESS_KEY_ID`: credencial AWS ou valor fake no LocalStack
+- `AWS_SECRET_ACCESS_KEY`: credencial AWS ou valor fake no LocalStack
+- `SNS_TOPIC_NAME`: nome do tópico usado no bootstrap local
+- `SQS_QUEUE_NAME`: nome da fila usada no bootstrap local
+- `SNS_TOPIC_ARN`: ARN do tópico SNS usado pelo produtor
+- `SQS_QUEUE_URL`: URL da fila SQS usada pelo consumidor
+- `PORT`: porta HTTP do produtor. Padrão `8080`
+- `FLASK_DEBUG`: `true` ou `false`
+- `WAIT_TIME_SECONDS`: tempo de long polling do consumidor
 
-### No consumidor
-Em `consumer/consumer.py`:
+## Rodando localmente com LocalStack
 
-- substitua `SUA_QUEUE_URL` pela URL real da fila SQS
+Esse é o fluxo mais simples agora.
 
-### Região AWS
-Os dois scripts estão fixados em `us-east-1`:
-
-- `boto3.client('sns', region_name='us-east-1')`
-- `boto3.client('sqs', region_name='us-east-1')`
-
-Se sua infraestrutura estiver em outra região, atualize esses valores.
-
-## Como executar
-
-### 1. Inicie o produtor
+### 1. Suba o LocalStack
 
 ```bash
-python producer/producer.py
+docker compose up -d
 ```
 
-Observação: o produtor está configurado para subir na porta `80` com `debug=True`. Em algumas máquinas Linux, a porta 80 pode exigir permissões elevadas. Se necessário, altere a porta no arquivo.
+### 2. Execute o bootstrap automático
 
-### 2. Inicie o consumidor
+Esse script:
 
-Em outro terminal:
+- cria o tópico SNS
+- cria a fila SQS
+- cria a assinatura SNS -> SQS
+- atualiza o arquivo `.env` com `SNS_TOPIC_ARN` e `SQS_QUEUE_URL`
 
 ```bash
+chmod +x scripts/bootstrap_localstack.sh
+./scripts/bootstrap_localstack.sh
+```
+
+### 3. Rode o consumidor
+
+Em um terminal separado:
+
+```bash
+source .venv/bin/activate
 python consumer/consumer.py
 ```
 
-O consumidor ficará em loop contínuo aguardando mensagens.
+### 4. Rode o produtor
 
-## Exemplo de requisição
-
-Com o produtor em execução, envie um pedido para a API:
+Em outro terminal separado:
 
 ```bash
-curl -X POST http://localhost/pedido \
+source .venv/bin/activate
+python producer/producer.py
+```
+
+### 5. Envie um pedido de teste
+
+```bash
+curl -X POST http://localhost:8080/pedido \
   -H 'Content-Type: application/json' \
   -d '{"valor": 150.0}'
 ```
 
-Exemplo de resposta:
+### 6. Resultado esperado
+
+No terminal do produtor:
+
+- recebimento do pedido
+- publicação no SNS
+
+No terminal do consumidor:
+
+- leitura da mensagem da fila
+- processamento do pedido
+- simulação de nota fiscal e email
+
+## Rodando na AWS
+
+Na AWS, o comportamento lógico é o mesmo: o produtor e o consumidor continuam separados.
+
+### Cenário típico
+
+- **produtor**: roda em um processo responsável por receber chamadas HTTP
+- **consumidor**: roda em outro processo responsável por consumir a fila
+- **SNS/SQS**: conectam esses dois lados de forma assíncrona
+
+### 1. Prepare os recursos AWS
+
+Você precisa ter:
+
+- um tópico SNS
+- uma fila SQS
+- a fila assinada no tópico SNS
+- permissões IAM adequadas para publicar no SNS e consumir/apagar mensagens da SQS
+
+### 2. Configure o `.env` para AWS
+
+Exemplo:
+
+```bash
+cat > .env <<'EOF'
+AWS_REGION=us-east-1
+AWS_DEFAULT_REGION=us-east-1
+PORT=8080
+FLASK_DEBUG=false
+WAIT_TIME_SECONDS=10
+SNS_TOPIC_NAME=pedidos
+SQS_QUEUE_NAME=pedidos-queue
+SNS_TOPIC_ARN=arn:aws:sns:us-east-1:123456789012:pedidos
+SQS_QUEUE_URL=https://sqs.us-east-1.amazonaws.com/123456789012/pedidos-queue
+EOF
+```
+
+Observações:
+
+- na AWS real, normalmente **não** configure `AWS_ENDPOINT_URL`
+- `AWS_ACCESS_KEY_ID` e `AWS_SECRET_ACCESS_KEY` podem vir do ambiente, perfil, role IAM ou credenciais já configuradas na máquina/instância/container
+
+### 3. Rode o consumidor
+
+Em um processo/terminal:
+
+```bash
+source .venv/bin/activate
+python consumer/consumer.py
+```
+
+### 4. Rode o produtor
+
+Em outro processo/terminal:
+
+```bash
+source .venv/bin/activate
+python producer/producer.py
+```
+
+### 5. Envie um pedido de teste
+
+```bash
+curl -X POST http://localhost:8080/pedido \
+  -H 'Content-Type: application/json' \
+  -d '{"valor": 150.0}'
+```
+
+> Se o produtor estiver publicado em outra máquina, container ou serviço na AWS, ajuste a URL do `curl` para o endereço real dessa aplicação.
+
+## Contrato atual do sistema
+
+### Entrada do produtor
+
+`POST /pedido`
+
+Payload esperado:
 
 ```json
 {
-  "pedidoId": "<uuid-gerado>",
   "valor": 150.0
 }
 ```
 
-## Fluxo esperado no terminal
+### Saída do produtor
 
-### Produtor
-- recebe o pedido
-- gera um `pedidoId`
-- publica no SNS
+Resposta de sucesso:
 
-### Consumidor
-- lê a mensagem da SQS
-- evita reprocessamento básico em memória com `processed = set()`
-- simula ações como:
-  - gerar nota fiscal
-  - enviar email
+```json
+{
+  "pedidoId": "<uuid>",
+  "valor": 150.0
+}
+```
+
+### Erros tratados
+
+- `500` se `SNS_TOPIC_ARN` não estiver configurada
+- `400` se o campo `valor` não for enviado
+
+## Comportamento atual do código
+
+### `producer/producer.py`
+
+- carrega `.env` automaticamente
+- lê `AWS_REGION`, `AWS_ENDPOINT_URL`, `SNS_TOPIC_ARN`, `PORT` e `FLASK_DEBUG`
+- valida configuração e payload
+- publica a mensagem no SNS
+
+### `consumer/consumer.py`
+
+- carrega `.env` automaticamente
+- lê `AWS_REGION`, `AWS_ENDPOINT_URL`, `SQS_QUEUE_URL` e `WAIT_TIME_SECONDS`
+- faz long polling na fila
+- processa mensagens em loop contínuo
+- evita duplicados apenas em memória
 
 ## Limitações atuais
 
-- `main.py` ainda está com o conteúdo padrão da IDE.
-- Não existe `requirements.txt` no projeto neste momento.
-- A deduplicação do consumidor é apenas em memória; ao reiniciar o processo, os IDs processados são perdidos.
-- O produtor assume que `request.json` contém a chave `valor`.
-- O produtor está iniciando o servidor diretamente ao importar o arquivo.
+- `main.py` ainda está com o conteúdo padrão da IDE
+- a deduplicação do consumidor é apenas em memória
+- o consumidor assume o formato de mensagem SNS entregue via SQS
+- o bootstrap local depende de `aws` CLI instalada
 
 ## Próximos passos sugeridos
 
-- adicionar um `requirements.txt`
-- mover configurações para variáveis de ambiente
-- trocar placeholders por leitura de `.env`
-- melhorar validação de payload da rota `/pedido`
-- proteger o `app.run(...)` com `if __name__ == '__main__':`
-
-## Observação
-
-Este repositório parece ser um exemplo didático de comunicação assíncrona entre serviços usando AWS. A documentação acima descreve o comportamento atual do código, sem assumir recursos que ainda não foram implementados.
-
+- adicionar testes automatizados
+- criar um `Makefile` para concentrar os comandos mais usados
+- adicionar `healthcheck` e espera ativa para o LocalStack
+- empacotar produtor e consumidor em containers separados
