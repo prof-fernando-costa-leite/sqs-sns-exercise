@@ -49,9 +49,9 @@ def validate_configuration():
 
 
 def check_aws_credentials():
-    """Verifica se boto3 consegue detectar credenciais com retry."""
+    """Verifica credenciais sem impedir startup do servidor."""
     import time
-    max_retries = 5
+    max_retries = 3
     retry_delay = 2
 
     for attempt in range(max_retries):
@@ -61,19 +61,14 @@ def check_aws_credentials():
             if credentials:
                 print(f'✅ Credenciais detectadas: {credentials.access_key[:10]}...')
                 return True
-        except Exception as e:
+        except Exception:
             pass
 
         if attempt < max_retries - 1:
             print(f'⏳ Tentando detectar credenciais... (tentativa {attempt + 1}/{max_retries})')
             time.sleep(retry_delay)
 
-    print('⚠️  Nenhuma credencial encontrada após várias tentativas.')
-    print('   Se estiver em EC2:')
-    print('   1. Verifique se a IAM Role está anexada: ')
-    print('      curl -s http://169.254.169.254/latest/meta-data/iam/security-credentials/')
-    print('   2. Aguarde 30-60 segundos após iniciar a EC2 (metadata service leva tempo)')
-    print('   3. Se ainda não funcionar, tente em outro terminal')
+    print('⚠️  Credenciais não detectadas no startup. O servidor vai subir e tentará no publish.')
     return False
 
 
@@ -91,10 +86,18 @@ def criar_pedido():
         'pedidoId': str(uuid.uuid4()),
         'valor': valor,
     }
-    print(f"Pedido recebido: {pedido['pedidoId']} - Valor: {pedido['valor']}")
-    sns.publish(TopicArn=SNS_TOPIC_ARN, Message=json.dumps(pedido))
-    print('→ Pedido enviado para SNS')
-    return jsonify(pedido), 201
+
+    try:
+        print(f"Pedido recebido: {pedido['pedidoId']} - Valor: {pedido['valor']}")
+        sns.publish(TopicArn=SNS_TOPIC_ARN, Message=json.dumps(pedido))
+        print('→ Pedido enviado para SNS')
+        return jsonify(pedido), 201
+    except Exception as e:
+        return jsonify({
+            'erro': 'Falha ao publicar no SNS',
+            'detalhe': str(e),
+            'dica': 'Configure AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY ou anexe IAM Role na EC2',
+        }), 500
 
 
 if __name__ == '__main__':
@@ -105,8 +108,7 @@ if __name__ == '__main__':
     if not validate_configuration():
         sys.exit(1)
     print()
-    if not check_aws_credentials():
-        sys.exit(1)
+    check_aws_credentials()
     print()
     print(f'🚀 Iniciando servidor na porta {PORT}...')
     print(f'   POST http://localhost:{PORT}/pedido\n')
