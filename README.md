@@ -229,6 +229,206 @@ curl -X POST http://localhost:8080/pedido \
 
 > Se o produtor estiver publicado em outra máquina, container ou serviço na AWS, ajuste a URL do `curl` para o endereço real dessa aplicação.
 
+## Rodando na AWS em uma unica EC2 (modo aula)
+
+Este guia e para subir o **produtor e consumidor na mesma instancia EC2**, em processos separados, conectados ao SNS/SQS da sua conta AWS.
+
+### 1. Crie uma EC2 e conecte por SSH
+
+Requisitos recomendados da instancia:
+
+- Amazon Linux 2023 ou Ubuntu 22.04
+- Security Group liberando a porta `8080` (ou a porta que voce escolher para o produtor)
+- IAM Role anexada na EC2 com permissoes para SNS e SQS
+
+### 2. Instale dependencias na EC2
+
+```bash
+sudo dnf update -y || true
+sudo dnf install -y git python3 python3-pip awscli tmux || true
+
+sudo apt update -y || true
+sudo apt install -y git python3 python3-venv python3-pip awscli tmux || true
+```
+
+### 3. Clone o projeto e prepare ambiente Python
+
+```bash
+git clone <URL_DO_REPOSITORIO>
+cd assyncronous
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
+```
+
+### 4. Crie SNS e SQS na AWS (automatico via AWS CLI)
+
+Escolha os nomes e regiao:
+
+```bash
+export AWS_REGION=us-east-1
+export AWS_DEFAULT_REGION=us-east-1
+export SNS_TOPIC_NAME=pedidos-aula
+export SQS_QUEUE_NAME=pedidos-aula-queue
+```
+
+Crie topico e fila:
+
+```bash
+export SNS_TOPIC_ARN=$(aws sns create-topic \
+  --name "$SNS_TOPIC_NAME" \
+  --query 'TopicArn' \
+  --output text)
+
+aws sqs create-queue --queue-name "$SQS_QUEUE_NAME" >/dev/null
+
+export SQS_QUEUE_URL=$(aws sqs get-queue-url \
+  --queue-name "$SQS_QUEUE_NAME" \
+  --query 'QueueUrl' \
+  --output text)
+
+export SQS_QUEUE_ARN=$(aws sqs get-queue-attributes \
+  --queue-url "$SQS_QUEUE_URL" \
+  --attribute-names QueueArn \
+  --query 'Attributes.QueueArn' \
+  --output text)
+```
+
+Aplique policy da fila para permitir envio do SNS:
+
+```bash
+QUEUE_POLICY=$(cat <<EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "Allow-SNS-SendMessage",
+      "Effect": "Allow",
+      "Principal": "*",
+      "Action": "sqs:SendMessage",
+      "Resource": "$SQS_QUEUE_ARN",
+      "Condition": {
+        "ArnEquals": {
+          "aws:SourceArn": "$SNS_TOPIC_ARN"
+        }
+      }
+    }
+  ]
+}
+EOF
+)
+
+aws sqs set-queue-attributes \
+  --queue-url "$SQS_QUEUE_URL" \
+  --attributes Policy="$QUEUE_POLICY"
+```
+
+Crie a assinatura SNS -> SQS:
+
+```bash
+aws sns subscribe \
+  --topic-arn "$SNS_TOPIC_ARN" \
+  --protocol sqs \
+  --notification-endpoint "$SQS_QUEUE_ARN" >/dev/null
+```
+
+### 5. Configure o `.env` da EC2
+
+```bash
+cat > .env <<EOF
+AWS_REGION=$AWS_REGION
+AWS_DEFAULT_REGION=$AWS_DEFAULT_REGION
+PORT=8080
+FLASK_DEBUG=false
+WAIT_TIME_SECONDS=10
+SNS_TOPIC_NAME=$SNS_TOPIC_NAME
+SQS_QUEUE_NAME=$SQS_QUEUE_NAME
+SNS_TOPIC_ARN=$SNS_TOPIC_ARN
+SQS_QUEUE_URL=$SQS_QUEUE_URL
+EOF
+```
+
+Importante:
+
+- em AWS real, nao configure `AWS_ENDPOINT_URL`
+- se a EC2 tiver IAM Role, nao precisa setar `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`
+
+### 6. Rode consumidor e produtor em processos separados na mesma EC2
+
+Opcao simples para aula com `tmux` (recomendada):
+
+```bash
+tmux new-session -d -s consumer 'cd ~/assyncronous && source .venv/bin/activate && python consumer/consumer.py'
+
+tmux new-session -d -s producer 'cd ~/assyncronous && source .venv/bin/activate && python producer/producer.py'
+```
+
+Ver logs dos dois:
+
+```bash
+tmux attach -t consumer
+# para sair sem matar: Ctrl+b depois d
+
+tmux attach -t producer
+# para sair sem matar: Ctrl+b depois d
+```
+
+### 7. Teste fim a fim
+
+Da propria EC2:
+
+```bash
+curl -X POST http://localhost:8080/pedido \
+  -H 'Content-Type: application/json' \
+  -d '{"valor": 150.0}'
+```
+
+Do seu computador (se o Security Group liberar `8080` e voce usar o IP publico da EC2):
+
+```bash
+curl -X POST http://<IP_PUBLICO_DA_EC2>:8080/pedido \
+  -H 'Content-Type: application/json' \
+  -d '{"valor": 150.0}'
+```
+
+### 8. IAM minimo sugerido para a Role da EC2
+
+Exemplo de policy (ajuste ARNs para sua conta):
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "sns:Publish"
+      ],
+      "Resource": "arn:aws:sns:us-east-1:123456789012:pedidos-aula"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "sqs:ReceiveMessage",
+        "sqs:DeleteMessage",
+        "sqs:GetQueueAttributes",
+        "sqs:GetQueueUrl",
+        "sqs:ChangeMessageVisibility"
+      ],
+      "Resource": "arn:aws:sqs:us-east-1:123456789012:pedidos-aula-queue"
+    }
+  ]
+}
+```
+
+### 9. Encerrando processos
+
+```bash
+tmux kill-session -t producer
+tmux kill-session -t consumer
+```
+
 ## Contrato atual do sistema
 
 ### Entrada do produtor
