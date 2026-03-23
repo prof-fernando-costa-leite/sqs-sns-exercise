@@ -49,20 +49,32 @@ def validate_configuration():
 
 
 def check_aws_credentials():
-    """Verifica se boto3 consegue detectar credenciais."""
-    try:
-        session = boto3.Session()
-        credentials = session.get_credentials()
-        if credentials:
-            print(f'✅ Credenciais detectadas: {credentials.access_key[:10]}...')
-            return True
-        else:
-            print('⚠️  Nenhuma credencial encontrada localmente.')
-            print('   Se estiver em EC2, verifique se a IAM Role está anexada.')
-            return False
-    except Exception as e:
-        print(f'❌ Erro ao verificar credenciais: {e}')
-        return False
+    """Verifica se boto3 consegue detectar credenciais com retry."""
+    import time
+    max_retries = 5
+    retry_delay = 2
+
+    for attempt in range(max_retries):
+        try:
+            session = boto3.Session()
+            credentials = session.get_credentials()
+            if credentials:
+                print(f'✅ Credenciais detectadas: {credentials.access_key[:10]}...')
+                return True
+        except Exception as e:
+            pass
+
+        if attempt < max_retries - 1:
+            print(f'⏳ Tentando detectar credenciais... (tentativa {attempt + 1}/{max_retries})')
+            time.sleep(retry_delay)
+
+    print('⚠️  Nenhuma credencial encontrada após várias tentativas.')
+    print('   Se estiver em EC2:')
+    print('   1. Verifique se a IAM Role está anexada: ')
+    print('      curl -s http://169.254.169.254/latest/meta-data/iam/security-credentials/')
+    print('   2. Aguarde 30-60 segundos após iniciar a EC2 (metadata service leva tempo)')
+    print('   3. Se ainda não funcionar, tente em outro terminal')
+    return False
 
 
 @app.route('/pedido', methods=['POST'])

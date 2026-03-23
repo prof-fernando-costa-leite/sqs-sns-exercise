@@ -485,123 +485,75 @@ Resposta de sucesso:
 
 ## Troubleshooting em Produção (EC2)
 
-### Erro: "botocore.crt.auth" ou erro de autenticação AWS
+### Erro: "Nenhuma credencial encontrada" na EC2
 
-Se você receber erro de autenticação ao rodar producer/consumer na EC2:
+Se ao iniciar o producer/consumer na EC2 você vê:
 
 ```
-File "/botocore/signers.py"
-File "/botocore/crt/auth.py"
-...credenciais...
+⚠️  Nenhuma credencial encontrada após várias tentativas.
+   Se estiver em EC2:
+   1. Verifique se a IAM Role está anexada: 
+      curl -s http://169.254.169.254/latest/meta-data/iam/security-credentials/
+   2. Aguarde 30-60 segundos após iniciar a EC2 (metadata service leva tempo)
+   3. Se ainda não funcionar, tente em outro terminal
 ```
 
 **Causa raiz:**
 
-O boto3 não consegue detectar credenciais para acessar SNS/SQS.
+O metadata service da EC2 (que fornece credenciais da IAM Role) **leva alguns segundos para ficar disponível** após a instância iniciar. O boto3 tentou 5 vezes com 2 segundos de intervalo, mas ainda não conseguiu.
 
-**Solução:**
+**Solução (3 opções):**
 
-#### 1. Verifique se a EC2 tem IAM Role anexada
+#### Opção 1: Aguardar e tentar novamente (30-60 segundos)
 
-Na AWS Console:
-- Acesse **EC2 > Instances**
-- Clique na sua instância
-- Verifique se existe uma **IAM Role** em "IAM role"
-
-Ou pela CLI na EC2:
-
-```bash
-curl -s http://169.254.169.254/latest/meta-data/iam/security-credentials/
-```
-
-Se retornar um nome de role, está anexado. Se retornar erro, não está.
-
-#### 2. Verifique se a IAM Role tem as permissões corretas
-
-A Role deve ter policy com:
-
-**Para o Producer (SNS):**
-
-```json
-{
-  "Effect": "Allow",
-  "Action": ["sns:Publish"],
-  "Resource": "arn:aws:sns:us-east-1:123456789012:pedidos"
-}
-```
-
-**Para o Consumer (SQS):**
-
-```json
-{
-  "Effect": "Allow",
-  "Action": [
-    "sqs:ReceiveMessage",
-    "sqs:DeleteMessage",
-    "sqs:GetQueueAttributes"
-  ],
-  "Resource": "arn:aws:sqs:us-east-1:123456789012:pedidos-queue"
-}
-```
-
-#### 3. Verifique se o `.env` foi preenchido corretamente
-
-```bash
-cat .env
-```
-
-Verifique:
-
-- `SNS_TOPIC_ARN` tem um valor válido? (não vazio)
-- `SQS_QUEUE_URL` tem um valor válido? (não vazio)
-- `AWS_REGION` está correto?
-- `AWS_ENDPOINT_URL` **não está** definido (deixe em branco para AWS real)
-
-#### 4. Rode com debug
-
-O producer e consumer agora mostram mensagens de validação ao iniciar:
+Apenas aguarde um pouco mais e execute novamente:
 
 ```bash
 python producer/producer.py
 ```
 
-Resultado esperado:
+Depois de alguns minutos da instância estar ativa, o metadata service vai responder corretamente.
 
-```
-============================================================
-PRODUCER - SNS/SQS
-============================================================
+#### Opção 2: Verificar se a IAM Role está mesmo anexada
 
-✅ Configuração validada:
-   AWS_REGION: us-east-1
-   SNS_TOPIC_ARN: arn:aws:sns:us-east-1:123456789012:pedidos
-   Usando IAM Role da EC2
-   PORT: 8080
-
-✅ Credenciais detectadas: AKIAIOSFODNN...
-
-🚀 Iniciando servidor na porta 8080...
-   POST http://localhost:8080/pedido
-```
-
-Se vir **❌** ou **⚠️**, siga as instruções na mensagem.
-
-#### 5. Teste a conectividade com SNS/SQS
-
-Na EC2, teste se consegue acessar os serviços:
+Na EC2:
 
 ```bash
-# Testar SNS
-aws sns list-topics --region us-east-1
-
-# Testar SQS
-aws sqs list-queues --region us-east-1
+curl -s http://169.254.169.254/latest/meta-data/iam/security-credentials/
 ```
 
-Se receber erro de credenciais, confirme que:
-1. A IAM Role está anexada
-2. A Role tem permissão de **sts:AssumeRole**
-3. Você está testando com o **mesmo** `AWS_REGION` do `.env`
+**Se retornar um nome de role** (ex: `my-ec2-role`):
+```
+my-ec2-role
+```
+→ A IAM Role está anexada. Aguarde mais alguns segundos e tente novamente.
+
+**Se retornar erro ou timeout**:
+```
+curl: (28) Timeout was reached
+```
+→ A IAM Role **NÃO está anexada**. Você precisa:
+1. Parar a EC2
+2. Ir em **EC2 > Instances > Ações > Segurança > Modificar role da IAM**
+3. Selecionar uma Role que tenha permissões SNS/SQS
+4. Reiniciar a EC2
+
+#### Opção 3: Usar AWS CLI para validar credenciais
+
+```bash
+aws sts get-caller-identity
+```
+
+Se funcionar, retorna:
+```json
+{
+  "UserId": "AIDAIOSFODNN7EXAMPLE:i-1234567890abcdef0",
+  "Account": "123456789012",
+  "Arn": "arn:aws:iam::123456789012:role/my-ec2-role"
+}
+```
+
+Se falhar com erro de credenciais, a Role não está anexada.
 
 ### Erro: "Acesso negado" ou "não autorizado"
 
@@ -634,9 +586,76 @@ The specified queue does not exist.
 2. Confirme a **região** no `.env` (ex: `us-east-1`, `us-west-2`)
 3. Recrie o SNS/SQS no passo 4 do guia de aula se necessário
 
-## Próximos passos sugeridos
+### Erro: "botocore.crt.auth" ou erro de autenticação AWS após credenciais detectadas
 
-- adicionar testes automatizados
-- criar um `Makefile` para concentrar os comandos mais usados
-- adicionar `healthcheck` e espera ativa para o LocalStack
-- empacotar produtor e consumidor em containers separados
+Se você receber erro de autenticação ao tentar publicar/consumir mensagens, mesmo com credenciais detectadas:
+
+```
+File "/botocore/signers.py"
+File "/botocore/crt/auth.py"
+```
+
+**Causa raiz:**
+
+A IAM Role foi detectada, mas ela **não tem as permissões necessárias** para acessar SNS ou SQS.
+
+**Solução:**
+
+#### 1. Verifique se a IAM Role tem as permissões corretas
+
+A Role deve ter policy com:
+
+**Para o Producer (SNS):**
+
+```json
+{
+  "Effect": "Allow",
+  "Action": ["sns:Publish"],
+  "Resource": "arn:aws:sns:us-east-1:123456789012:pedidos"
+}
+```
+
+**Para o Consumer (SQS):**
+
+```json
+{
+  "Effect": "Allow",
+  "Action": [
+    "sqs:ReceiveMessage",
+    "sqs:DeleteMessage",
+    "sqs:GetQueueAttributes"
+  ],
+  "Resource": "arn:aws:sqs:us-east-1:123456789012:pedidos-queue"
+}
+```
+
+#### 2. Teste com AWS CLI na EC2
+
+```bash
+# Testar SNS
+aws sns list-topics --region us-east-1
+
+# Testar SQS
+aws sqs list-queues --region us-east-1
+```
+
+Se receber erro de credenciais/acesso, a permissão não está correta.
+
+#### 3. Atualize a policy na IAM Role
+
+Na AWS Console:
+- Acesse **IAM > Roles**
+- Procure pela Role anexada na EC2
+- Clique em **Add permissions > Create inline policy**
+- Cole a policy acima (ajuste os ARNs para seus recursos)
+- Salve
+
+#### 4. Tente novamente na EC2
+
+```bash
+python producer/producer.py
+```
+
+A Role pode levar alguns segundos para aplicar a nova permissão. Se ainda não funcionar, tente em um novo terminal.
+
+````
