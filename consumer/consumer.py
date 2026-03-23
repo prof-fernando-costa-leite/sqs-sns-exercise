@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 import time
+import sys
 
 load_dotenv(Path(__file__).resolve().parents[1] / '.env')
 
@@ -13,6 +14,48 @@ SQS_QUEUE_URL = os.getenv('SQS_QUEUE_URL')
 WAIT_TIME_SECONDS = int(os.getenv('WAIT_TIME_SECONDS', '10'))
 
 processed = set()
+
+
+def validate_configuration():
+    """Valida configuração antes de iniciar o consumer."""
+    errors = []
+
+    if not SQS_QUEUE_URL:
+        errors.append('❌ SQS_QUEUE_URL não está configurada no .env')
+    elif 'sqs' not in SQS_QUEUE_URL.lower():
+        errors.append(f'❌ SQS_QUEUE_URL parece inválida: {SQS_QUEUE_URL}')
+
+    if not AWS_REGION:
+        errors.append('❌ AWS_REGION não está configurada')
+
+    if errors:
+        print('\n'.join(errors))
+        print('\n💡 Verifique se o arquivo .env foi preenchido corretamente.')
+        sys.exit(1)
+
+    print(f'✅ Configuração validada:')
+    print(f'   AWS_REGION: {AWS_REGION}')
+    print(f'   SQS_QUEUE_URL: {SQS_QUEUE_URL[:50]}...')
+    if AWS_ENDPOINT_URL:
+        print(f'   AWS_ENDPOINT_URL: {AWS_ENDPOINT_URL} (LocalStack)')
+    else:
+        print(f'   Usando IAM Role da EC2')
+
+
+def check_aws_credentials():
+    """Verifica se boto3 consegue detectar credenciais."""
+    try:
+        session = boto3.Session()
+        credentials = session.get_credentials()
+        if credentials:
+            print(f'✅ Credenciais detectadas: {credentials.access_key[:10]}...')
+        else:
+            print('⚠️  Nenhuma credencial encontrada localmente.')
+            print('   Se estiver em EC2, verifique se a IAM Role está anexada.')
+            sys.exit(1)
+    except Exception as e:
+        print(f'❌ Erro ao verificar credenciais: {e}')
+        sys.exit(1)
 
 
 def create_sqs_client():
@@ -25,45 +68,66 @@ def process_messages():
 
     sqs = create_sqs_client()
 
-    while True:
-        response = sqs.receive_message(
-            QueueUrl=SQS_QUEUE_URL,
-            MaxNumberOfMessages=1,
-            WaitTimeSeconds=WAIT_TIME_SECONDS,
-        )
-        messages = response.get('Messages', [])
-        if not messages:
-            print('Nenhuma mensagem disponível. Aguardando...')
-            time.sleep(1)
-            continue
+    print('🔄 Iniciando consumer...')
+    print('   Aguardando mensagens da fila SQS...')
+    print('   (Pressione Ctrl+C para parar)\n')
 
-        for message in messages:
-            body = json.loads(message['Body'])
-            pedido = json.loads(body.get('Message', '{}'))
-            pedido_id = pedido.get('pedidoId')
-            if not pedido_id:
-                print('Mensagem inválida ignorada: pedidoId ausente')
-                sqs.delete_message(
-                    QueueUrl=SQS_QUEUE_URL,
-                    ReceiptHandle=message['ReceiptHandle'],
-                )
-                continue
-            if pedido_id in processed:
-                print('Duplicado ignorado')
-                sqs.delete_message(
-                    QueueUrl=SQS_QUEUE_URL,
-                    ReceiptHandle=message['ReceiptHandle'],
-                )
-                continue
-            processed.add(pedido_id)
-            print(f'Processando pedido: {pedido_id}')
-            print('→ Gerando nota fiscal...')
-            print('→ Enviando email...')
-            sqs.delete_message(
+    while True:
+        try:
+            response = sqs.receive_message(
                 QueueUrl=SQS_QUEUE_URL,
-                ReceiptHandle=message['ReceiptHandle'],
+                MaxNumberOfMessages=1,
+                WaitTimeSeconds=WAIT_TIME_SECONDS,
             )
+            messages = response.get('Messages', [])
+            if not messages:
+                print(f'[{time.strftime("%H:%M:%S")}] Nenhuma mensagem disponível. Aguardando...')
+                time.sleep(1)
+                continue
+
+            for message in messages:
+                body = json.loads(message['Body'])
+                pedido = json.loads(body.get('Message', '{}'))
+                pedido_id = pedido.get('pedidoId')
+                if not pedido_id:
+                    print('Mensagem inválida ignorada: pedidoId ausente')
+                    sqs.delete_message(
+                        QueueUrl=SQS_QUEUE_URL,
+                        ReceiptHandle=message['ReceiptHandle'],
+                    )
+                    continue
+                if pedido_id in processed:
+                    print('Duplicado ignorado')
+                    sqs.delete_message(
+                        QueueUrl=SQS_QUEUE_URL,
+                        ReceiptHandle=message['ReceiptHandle'],
+                    )
+                    continue
+                processed.add(pedido_id)
+                print(f'✅ Processando pedido: {pedido_id}')
+                print('→ Gerando nota fiscal...')
+                print('→ Enviando email...')
+                sqs.delete_message(
+                    QueueUrl=SQS_QUEUE_URL,
+                    ReceiptHandle=message['ReceiptHandle'],
+                )
+        except Exception as e:
+            print(f'\n❌ Erro ao processar mensagens: {e}')
+            print(f'   Tipo: {type(e).__name__}')
+            print(f'   Verifique:')
+            print(f'   1. IAM Role da EC2 tem permissão de SQS?')
+            print(f'   2. SQS_QUEUE_URL está correta?')
+            print(f'   3. A fila existe na região {AWS_REGION}?')
+            time.sleep(5)
 
 
 if __name__ == '__main__':
+    print('=' * 60)
+    print('CONSUMER - SNS/SQS')
+    print('=' * 60 + '\n')
+
+    validate_configuration()
+    print()
+    check_aws_credentials()
+    print()
     process_messages()

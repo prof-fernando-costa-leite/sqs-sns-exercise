@@ -483,6 +483,157 @@ Resposta de sucesso:
 - o consumidor assume o formato de mensagem SNS entregue via SQS
 - o bootstrap local depende de `aws` CLI instalada
 
+## Troubleshooting em Produção (EC2)
+
+### Erro: "botocore.crt.auth" ou erro de autenticação AWS
+
+Se você receber erro de autenticação ao rodar producer/consumer na EC2:
+
+```
+File "/botocore/signers.py"
+File "/botocore/crt/auth.py"
+...credenciais...
+```
+
+**Causa raiz:**
+
+O boto3 não consegue detectar credenciais para acessar SNS/SQS.
+
+**Solução:**
+
+#### 1. Verifique se a EC2 tem IAM Role anexada
+
+Na AWS Console:
+- Acesse **EC2 > Instances**
+- Clique na sua instância
+- Verifique se existe uma **IAM Role** em "IAM role"
+
+Ou pela CLI na EC2:
+
+```bash
+curl -s http://169.254.169.254/latest/meta-data/iam/security-credentials/
+```
+
+Se retornar um nome de role, está anexado. Se retornar erro, não está.
+
+#### 2. Verifique se a IAM Role tem as permissões corretas
+
+A Role deve ter policy com:
+
+**Para o Producer (SNS):**
+
+```json
+{
+  "Effect": "Allow",
+  "Action": ["sns:Publish"],
+  "Resource": "arn:aws:sns:us-east-1:123456789012:pedidos"
+}
+```
+
+**Para o Consumer (SQS):**
+
+```json
+{
+  "Effect": "Allow",
+  "Action": [
+    "sqs:ReceiveMessage",
+    "sqs:DeleteMessage",
+    "sqs:GetQueueAttributes"
+  ],
+  "Resource": "arn:aws:sqs:us-east-1:123456789012:pedidos-queue"
+}
+```
+
+#### 3. Verifique se o `.env` foi preenchido corretamente
+
+```bash
+cat .env
+```
+
+Verifique:
+
+- `SNS_TOPIC_ARN` tem um valor válido? (não vazio)
+- `SQS_QUEUE_URL` tem um valor válido? (não vazio)
+- `AWS_REGION` está correto?
+- `AWS_ENDPOINT_URL` **não está** definido (deixe em branco para AWS real)
+
+#### 4. Rode com debug
+
+O producer e consumer agora mostram mensagens de validação ao iniciar:
+
+```bash
+python producer/producer.py
+```
+
+Resultado esperado:
+
+```
+============================================================
+PRODUCER - SNS/SQS
+============================================================
+
+✅ Configuração validada:
+   AWS_REGION: us-east-1
+   SNS_TOPIC_ARN: arn:aws:sns:us-east-1:123456789012:pedidos
+   Usando IAM Role da EC2
+   PORT: 8080
+
+✅ Credenciais detectadas: AKIAIOSFODNN...
+
+🚀 Iniciando servidor na porta 8080...
+   POST http://localhost:8080/pedido
+```
+
+Se vir **❌** ou **⚠️**, siga as instruções na mensagem.
+
+#### 5. Teste a conectividade com SNS/SQS
+
+Na EC2, teste se consegue acessar os serviços:
+
+```bash
+# Testar SNS
+aws sns list-topics --region us-east-1
+
+# Testar SQS
+aws sqs list-queues --region us-east-1
+```
+
+Se receber erro de credenciais, confirme que:
+1. A IAM Role está anexada
+2. A Role tem permissão de **sts:AssumeRole**
+3. Você está testando com o **mesmo** `AWS_REGION` do `.env`
+
+### Erro: "Acesso negado" ou "não autorizado"
+
+Se a autenticação funciona, mas o acesso é negado:
+
+```
+User: arn:aws:iam::123456789012:role/my-role is not authorized...
+```
+
+**Solução:**
+
+Verifique se a IAM Role tem as ações exatas necessárias:
+
+- **Producer**: `sns:Publish` no tópico correto
+- **Consumer**: `sqs:ReceiveMessage`, `sqs:DeleteMessage`, `sqs:GetQueueAttributes` na fila correta
+
+Se as ações estiverem genéricas (com `*`), remova e coloque apenas as necessárias.
+
+### Erro: "Queue does not exist" ou "Topic does not exist"
+
+Se receber erro de que a fila ou tópico não existe:
+
+```
+The specified queue does not exist.
+```
+
+**Solução:**
+
+1. Verifique o nome correto na AWS Console
+2. Confirme a **região** no `.env` (ex: `us-east-1`, `us-west-2`)
+3. Recrie o SNS/SQS no passo 4 do guia de aula se necessário
+
 ## Próximos passos sugeridos
 
 - adicionar testes automatizados
